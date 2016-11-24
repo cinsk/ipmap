@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 # -*-python-*-
 
-"""A documentation string of this module.
-"""
-
-# 16777216","16777471","609013"
-
 import sys
 import os
 import codecs
@@ -512,50 +507,3 @@ generator.generate(htmlio, csvio,
                        option_latitude, option_longiude,
                        option_color, option_unknown_color)
 
-sys.exit(0)
-
-
-if len(args) != 4:
-    error(1, "wrong number of argument(s)")
-
-
-with codecs.open(block_database, "r", "utf-8") as io:
-    GEOIP = load_loc_database(io)
-
-with codecs.open(location_database, "r", "utf-8") as io:
-    CITIES = load_loc_database(io)
-
-COUNTRY_LOC = country_centroid()
-
-WEIGHT = dict()
-
-# total = 13941437
-total = int(sys.argv[1])
-count = 0
-percent = 0
-sys.stderr.write("Reading addresses\n")
-
-while True:
-    ln = sys.stdin.readline()
-    if ln == "":
-        break
-    ln = ln.strip()
-    if ln == "":
-        continue
-    # sys.stderr.write("looking up: %s\n" % ln)
-    cid = geoip_lookup(ln)
-    if cid is None:
-        continue
-    WEIGHT[cid] = WEIGHT.get(cid, 0) + 1
-
-    count += 1
-    new_percent = count * 100 / total;
-    if percent != new_percent:
-        percent = new_percent
-        sys.stderr.write("%3d %%\n" % percent)
-        
-sys.stderr.write("Generating\n")
-
-with codecs.open(sys.argv[2], "w", "utf-8") as jsio:
-    with codecs.open(sys.argv[3], "w", "utf-8") as csvio:
-        generate_html(WEIGHT, jsio, csvio)
