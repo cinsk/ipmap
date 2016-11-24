@@ -1,0 +1,561 @@
+#!/usr/bin/env python
+# -*-python-*-
+
+"""A documentation string of this module.
+"""
+
+# 16777216","16777471","609013"
+
+import sys
+import os
+import codecs
+import getopt
+import subprocess
+from distutils.spawn import find_executable
+
+BLOCK_DATABASE = "./GeoLiteCity-Blocks.csv"
+LOCATION_DATABASE = "./GeoLiteCity-Location.csv"
+PROGRAM_NAME = os.path.basename(sys.argv[0])
+DEV_NULL = open(os.devnull, 'w')
+
+option_debug = False
+option_progress = True
+option_title = PROGRAM_NAME
+option_apikey = "YOUR-API-KEY"
+option_zoom = 4
+option_scale = 100.0
+option_latitude = 47.6026
+option_longiude = -122.3284
+option_color = "#FF8C00"
+option_unknown_color = "#FF0000"
+
+def error(exitcode, *args):
+    msg = " ".join(args)
+    sys.stdout.flush()
+    sys.stderr.write("%s: %s\n" % (PROGRAM_NAME, msg))
+    sys.stderr.flush()
+    
+    if exitcode != 0:
+        sys.exit(exitcode)
+
+def debug(*args):
+    global option_debug
+    msg = " ".join(args)
+    if option_debug:
+        sys.stdout.flush()
+        sys.stderr.write("%s: debug: %s\n" % (PROGRAM_NAME, msg))
+        sys.stderr.flush()
+        
+class GeoIP:
+    def __init__(self):
+        self.locations = None
+        self.locations_len = 0 
+        self.blocks = None
+        self.blocks_len = 0 
+        self.countries = None
+        
+    def __load_loc(self, io):
+        cities = dict()
+
+        for i in range(2):
+            io.readline();                    # ignore header lines
+
+        while True:
+            ln = io.readline()
+            if ln == "":
+                break
+            fields = ln.strip().split(",")
+            if len(fields) != 9:
+                continue
+            (lid, country, region, city, postal, latitude, longitude, metro, area) = fields
+            cities[int(lid)] = { "country": country.strip('"'),
+                                 "region": region.strip('"'),
+                                 "city": city.strip('"'),
+                                 "latitude": float(latitude),
+                                 "longitude": float(longitude) }
+        return cities
+    
+    def __load_blk(self, io):
+        locations = list()
+
+        for i in range(2):
+            io.readline();                    # ignore header lines
+
+        while True:
+            ln = io.readline()
+            if ln == "":
+                break
+            fields = ln.strip().split(",")
+            if len(fields) != 3:
+                continue
+            (ip_begin, ip_end, locid) = fields
+            ip_range = ( int(ip_begin.strip('"')), int(ip_end.strip('"')) )
+            locations.append([int(ip_begin.strip('"')),
+                              int(ip_end.strip('"')),
+                              int(locid.strip('"'))])
+        return locations
+
+    def __country_locs(self):
+        country_cities = dict()
+
+        for cid, city in self.locations.iteritems():
+            country = city["country"]
+            if not country_cities.has_key(country):
+                country_cities[country] = []
+                country_cities[country].append(cid)
+
+        locs = dict()
+        for country, cities in country_cities.iteritems():
+            lng = sum([self.locations[cid]["longitude"] for cid in cities]) / len(cities)
+            lat = sum([self.locations[cid]["latitude"] for cid in cities]) / len(cities)
+
+            locs[country] = { "longitude": lng, "latitude": lat }
+        return locs
+
+    @staticmethod
+    def long2ip(val):
+        return "%d.%d.%d.%d" % ((val & 0xFF000000) >> 24,
+                                (val & 0x00FF0000) >> 16,
+                                (val & 0x0000FF00) >> 8,
+                                (val & 0x000000FF) >> 0)
+
+    @staticmethod
+    def ip2long(ipv4_s):
+        try:
+            comp = [int(x) for x in ipv4_s.split(".")]
+            retval = (comp[0] << 24) + (comp[1] << 16) + (comp[2] << 8) + (comp[3] << 0)
+            return retval
+        except IndexError:
+            return None
+
+    def load(self, loc_path, blk_path):
+        try:
+            error(0, "loading %s..." % loc_path)
+            with codecs.open(loc_path, "r", "ISO8859-1") as io:
+                self.locations = self.__load_loc(io)
+                self.locations_len = len(self.locations)
+        except IOError as e:
+            error(1, "IOError on %s: %s" % (loc_path, e.strerror))
+        
+        try:
+            error(0, "loading %s..." % blk_path)
+            with codecs.open(blk_path, "r", "ISO8859-1") as io:
+                self.blocks = self.__load_blk(io)
+                self.blocks_len = len(self.blocks)
+        except IOError as e:
+            error(1, "IOError on %s: %s" % (blk_path, e.strerror))
+
+            error(0, "calculating centroids for all countries...")
+            self.countries = self.__country_locs()
+            
+    def id_lookup(self, address):
+        ipval = GeoIP.ip2long(address)
+        if ipval is None:
+            return None
+        begin = 0
+        end = self.blocks_len - 1
+        
+        while begin <= end:
+            mid = (begin + end) / 2
+            (e_begin, e_end, e_locid) = self.blocks[mid]
+            if ipval < e_begin:
+                end = mid - 1
+            elif ipval > e_end:
+                begin = mid + 1
+            else:
+                return e_locid
+            
+    def lookup(self, address):
+        cid = self.id_lookup(address)
+        return self.location(cid)
+
+    def location(self, location_id):
+        try:
+            return self.locations[location_id]
+        except KeyError:
+            error(0, "location(id=%d) not found" % location_id)
+            return None
+        
+class MapGenerator:
+    MAX_LOCATION = 2000
+    HEADER = """<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="initial-scale=1.0, user-scalable=no">
+    <meta charset="utf-8">
+    <title>%s</title>
+    <style>
+      /* Always set the map height explicitly to define the size of the div
+       * element that contains the map. */
+      #map {
+        height: 100%%;
+      }
+      /* Optional: Makes the sample page fill the window. */
+      html, body {
+        height: 100%%;
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <script>
+      var citymap = {
+"""
+    FOOTER = """
+      };
+
+      function initMap() {
+        // Create the map.
+        var map = new google.maps.Map(document.getElementById('map'), {
+          zoom: %d,
+          center: {lat: %f, lng: %f},
+          mapTypeId: 'terrain'
+        });
+
+        // Construct the circle for each value in citymap.
+        // Note: We scale the area of the circle based on the population.
+        for (var city in citymap) {
+          // Add the circle for this city to the map.
+          var color;
+          if (citymap[city].name.length <= 4)
+            color = "%s";
+          else
+            color = "%s";
+
+          var cityCircle = new google.maps.Circle({
+            strokeColor: color,
+            strokeOpacity: 0.8,
+            strokeWeight: 1,
+            fillColor: color,
+            fillOpacity: 0.35,
+            map: map,
+            center: citymap[city].center,
+            title: citymap[city].title,
+            radius: Math.sqrt(citymap[city].population) * %f
+          });
+          google.maps.event.addListener(cityCircle,'mouseover',function(){
+          this.getMap().getDiv().setAttribute('title',this.get('title'));});
+
+          google.maps.event.addListener(cityCircle,'mouseout',function(){
+          this.getMap().getDiv().removeAttribute('title');});
+
+        }
+      }
+    </script>
+    <script async defer
+    src="https://maps.googleapis.com/maps/api/js?key=%s&callback=initMap">
+    </script>
+  </body>
+</html>
+"""
+
+    def __init__(self, geoip):
+        self.geoip = geoip
+        self.weights = dict()
+        
+    def __write_header(self, io, title):
+        io.write(MapGenerator.HEADER % title)
+        io.flush()
+        
+    def __write_footer(self, io, zoom, latitude, longitude, color, city_unknown_color, scale_factor, key):
+        io.write(MapGenerator.FOOTER % (zoom, latitude, longitude, city_unknown_color, color, scale_factor, key))
+        io.flush()
+        
+    def mk_ident(self, s):
+        name = ""
+        for c in s:
+            if c.isalnum():
+                name += c
+            else:
+                name += "_"
+        return name
+
+    def line_count(self, source_file):
+        def pure_count(source):
+            with open(source, "r") as io:
+                count = 0
+                while True:
+                    line = io.readline()
+                    if line == "":
+                        break
+                    count += 1
+                return count
+            
+        if source_file == "/dev/stdin" or source_file == "-":
+            return -1
+        
+        wcpath = find_executable("wc")
+        if wcpath is None:
+            return pure_count(source_file)
+        else:
+            proc = subprocess.Popen("wc -l \"%s\"" % source_file, shell = True,
+                                        stdout = subprocess.PIPE,
+                                        stderr = DEV_NULL)
+            (out, err) = proc.communicate()
+            if proc.returncode != 0:
+                return pure_count(source_file)
+            else:
+                return long(int(out.splitlines()[0].split()[0]))
+        
+    def collect(self, source_file):
+        def write_progress(s):
+            sys.stderr.write(s)
+            sys.stderr.flush()
+            
+        global option_progress
+        count = 0
+        progress = 0
+        total = 0
+
+        if option_progress:
+            total = self.line_count(source_file)
+
+        if source_file == "-":
+            source = sys.stdin
+        else:
+            try:
+                source = open(source_file, "r")
+            except IOError as e:
+                error(1, "cannot open %s: %s" % (source_file, e.message))
+
+        try:
+            if option_progress:
+                write_progress("progress: |" + " " * (50 + 5))
+            while True:
+                line = source.readline()
+                if line == "":
+                    break
+                line = line.strip()
+                if line == "":
+                    continue
+
+                cid = self.geoip.id_lookup(line)
+                if cid is None:
+                    debug("unrecognized address: %s" % line)
+                    continue
+
+                self.weights[cid] = self.weights.get(cid, 0) + 1
+
+                if option_progress:
+                    count += 1
+                    new_progress = count * 100 / (total * 2);
+                    if progress < new_progress:
+                        write_progress("\b" * 56 + "%-50s| %3d%%" % ("=", count * 100 / total))
+                        progress = new_progress
+            if option_progress:
+                write_progress("\n")
+        finally:
+            source.close()
+            
+    def generate(self, io, csvio, apikey,
+                     title = "ipmap-generator",
+                     zoom = 4,
+                     scale_factor = 100,
+                     latitude = 47.6026, longitude = -122.3284,
+                     color = "#FF8C00", city_unknown_color = "#FF0000"):
+        self.__write_header(io, title)
+
+        wsum = dict()
+        wlid = dict()
+
+        debug("merging duplicated locations...")
+        for lid, w in self.weights.iteritems():
+            if not self.geoip.locations.has_key(lid):
+                sys.stderr.write("error: CID not found: %s, weight=%d\n" % (str(lid), w))
+                continue
+            loc = self.geoip.location(lid)
+            key = self.mk_ident("%s__%s" % (loc["country"], loc["city"]))
+            #key = city["country"]
+            wsum[key] = wsum.get(key, 0) + w
+            if not wlid.has_key(key):
+                wlid[key] = lid
+
+        wlist = list(wsum.values())
+        wlist.sort()
+        wlist.reverse()
+
+        if len(wlist) > MapGenerator.MAX_LOCATION:
+            filter_val = wlist[MapGenerator.MAX_LOCATION]
+        else:
+            filter_val = 0
+
+        csvio.write("Country,City,Latitude,Longitude,Population\n")
+        for locname, w in wsum.iteritems():
+            loc = self.geoip.location(wlid[locname])
+            if w >= filter_val:
+                io.write("%s: { center: { lat: %f, lng: %f }, name: \"%s\", population: %d, title: \"%s: %d\" },\n" %
+                             (locname, loc["latitude"], loc["longitude"], locname, 
+                                  w, locname, w))
+            csvio.write("%s,\"%s\",%f,%f,%d\n" % (loc["country"], loc["city"], loc["latitude"], loc["longitude"], w))
+
+        ## for name, w in wsum.iteritems():
+        ##     if w < 10:
+        ##         continue
+        ##     print "%s: { center: { lat: %f, lng: %f }, population: %d }," % (name, COUNTRY_LOC[name]["latitude"], COUNTRY_LOC[name]["longitude"], w)
+
+        self.__write_footer(io, zoom, latitude, longitude, color, city_unknown_color, scale_factor, apikey)
+
+def help_and_exit():
+    message = """\
+Generate Google map HTML file for unique IP distribution
+Usage: %s [OPTION...] INPUT OUTPUT [CSV-OUTPUT]
+
+   -k, --key=KEY              Set Google Map API key
+
+   -s, --scale=SCALE          Set scale factor of circles (default: 100)
+   -L, --loc-database=DB      Set pathname of Locations database (default: ./GeoLiteCity-Location.csv)
+   -B, --blk-database=DB      Set pathname of Blocks database (default: ./GeoLiteCity-Blocks.csv)
+
+   -t, --title=TITLE          Set TITLE of the generated map 
+   -z, --zoom=ZOOM            Set zoom factor of the generated map (default: 4)
+
+   -a, --latitude=LAT         Set the center location of the map (default: 47.6026)
+   -l, --longitude=LNG        Set the center location of the map (default: -122.3284)
+
+   -c, --color=COLOR          Set the color of the circles (default: #FF8C00)
+   -u, --unknown-color=COLOR  Set the color of the circles for the unknown locations (default: #FF0000)
+
+       --progress             Enable progress bar
+
+       --help                 Show help message and exit
+       --version              Display version information and exit
+
+       --debug                Enable debug output
+
+"""
+    print message
+    sys.exit(0)
+    
+try:
+    opts, args = getopt.getopt(sys.argv[1:], "s:L:B:c:t:z:s:a:l:c:u:k:",
+                                   [
+                                       "help", "version", "debug", "key="
+                                       "loc-database=", "blk-database", "scale", "csv-output",
+                                       "title=", "zoom=", "scale=", "latitude=", "longitude=",
+                                       "color=", "unknown-color="
+                                   ])
+
+    for o, a in opts:
+        if o in ("--help", "-h"):
+            help_and_exit()
+        elif o in ("--version"):
+            version_and_exit()
+        elif o in ("--key", "-k"):
+            debug("a: %s" % a)
+            option_apikey = a
+        elif o in ("--scale", "-s"):
+            option_scale = int(a)
+        elif o in ("--loc-database", "-L"):
+            LOCATION_DATABASE = a
+        elif o in ("--blk-database", "-B"):
+            BLOCK_DATABASE = a
+        elif o in ("--csv-output", "-C"):
+            csv_output = a
+        elif o in ("--title", "-t"):
+            option_title = a
+        elif o in ("--zoom", "-z"):
+            option_title = int(a)
+        elif o in ("--scale", "-s"):
+            option_title = float(a)
+        elif o in ("--latitude", "-a"):
+            option_title = float(a)
+        elif o in ("--longitude", "-l"):
+            option_title = float(a)
+        elif o in ("--color", "-c"):
+            option_title = a
+        elif o in ("--unknown-color", "-u"):
+            option_title = a
+        elif o in ("--progress"):
+            option_progress = True
+        elif o in ("--debug"):
+            option_debug = True
+except getopt.GetoptError:
+    error(0, "invalid option")
+    error(1, "Try with `--help' for more information.")
+
+if len(args) != 2 and len(args) != 3:
+    error(0, "wrong number of argument(s)")
+    error(1, "Try with `--help' for more information.")
+
+debug("option_apikey: %s" % option_apikey)
+debug("option_title: %s" % option_title)
+debug("option_zoom: %d" % option_zoom)
+debug("option_scale: %f" % option_scale)
+debug("center pos: %f, %f" % (option_latitude, option_longiude))
+debug("colors: %s, %s" % (option_color, option_unknown_color))
+
+geoip = GeoIP()
+geoip.load(LOCATION_DATABASE, BLOCK_DATABASE)
+
+generator = MapGenerator(geoip)
+
+generator.collect(args[0])
+try:
+    htmlio = codecs.open(args[1], "w", "utf-8")               # IOError
+except IOException as e:
+    error(1, "cannot write to %s: %s" % (args[2], e.message))
+
+if len(args) == 3:
+    try:
+        csvio = codecs.open(args[2], "w", "utf-8")
+    except IOException as e:
+        error(1, "cannot write to %s: %s" % (args[2], e.message))
+else:
+    csvio = DEV_NULL
+    
+generator.generate(htmlio, csvio,
+                       option_apikey,
+                       option_title,
+                       option_zoom, option_scale,
+                       option_latitude, option_longiude,
+                       option_color, option_unknown_color)
+
+sys.exit(0)
+
+
+if len(args) != 4:
+    error(1, "wrong number of argument(s)")
+
+
+with codecs.open(block_database, "r", "utf-8") as io:
+    GEOIP = load_loc_database(io)
+
+with codecs.open(location_database, "r", "utf-8") as io:
+    CITIES = load_loc_database(io)
+
+COUNTRY_LOC = country_centroid()
+
+WEIGHT = dict()
+
+# total = 13941437
+total = int(sys.argv[1])
+count = 0
+percent = 0
+sys.stderr.write("Reading addresses\n")
+
+while True:
+    ln = sys.stdin.readline()
+    if ln == "":
+        break
+    ln = ln.strip()
+    if ln == "":
+        continue
+    # sys.stderr.write("looking up: %s\n" % ln)
+    cid = geoip_lookup(ln)
+    if cid is None:
+        continue
+    WEIGHT[cid] = WEIGHT.get(cid, 0) + 1
+
+    count += 1
+    new_percent = count * 100 / total;
+    if percent != new_percent:
+        percent = new_percent
+        sys.stderr.write("%3d %%\n" % percent)
+        
+sys.stderr.write("Generating\n")
+
+with codecs.open(sys.argv[2], "w", "utf-8") as jsio:
+    with codecs.open(sys.argv[3], "w", "utf-8") as csvio:
+        generate_html(WEIGHT, jsio, csvio)
