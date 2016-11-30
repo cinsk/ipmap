@@ -7,7 +7,8 @@ This small Python script generates Google Map HTML file with IP distributions.
 
 Installation
 ------------
-No additional installation required for the script.   However, you need to download the GeoLite City database from MaxMind: http://dev.maxmind.com/geoip/legacy/geolite/  Go there, and download "GeoLite City" database in CSV format.  You may need to uncompress it.  Then, you will have `GeoLiteCity-Blocks.csv` and `GeoLiteCity-Location.csv` which are required to run this script.
+No additional installation required for the script.   However, you need to download the GeoLite City database from MaxMind: http://dev.maxmind.com/geoip/legacy/geolite/  Go there, and download "GeoLite City" database in CSV format.  You may need to uncompress it.  Then, you will have `GeoLiteCity-Blocks.csv` and `GeoLiteCity-Location.csv` which are required to run this script.  Also, you need Google Map API Key.  Visit here to get a key: https://developers.google.com/maps/documentation/javascript/get-api-key
+
 
 Usage
 -----
